@@ -245,9 +245,15 @@ def lookup_appointment(
     state: Annotated[AgentState, InjectedState],
     ref_number: str = "",
     phone: str = "",
+    language: str = "en",
 ) -> dict:
     """Look up bookings by reference number OR phone number (whichever is
-    given). Returns one of:
+    given). ALWAYS pass `language` as "ar" if you are about to reply to
+    the user in Arabic (any dialect), or "en" if replying in English -
+    this makes the booking system return doctor/branch/service names
+    already spelled correctly in that language, so you never have to
+    translate or transliterate a name yourself (which risks misspelling
+    it). Returns one of:
     {"status": "not_found"}
     {"status": "found_one", "appointment": {...}}
     {"status": "found_many", "appointments": [...]}
@@ -260,9 +266,9 @@ def lookup_appointment(
     base_url = _base_url(state)
 
     if ref_number:
-        result = api.get_bookings_by_ref(base_url, ref_number)
+        result = api.get_bookings_by_ref(base_url, ref_number, language=language)
     elif phone:
-        result = api.get_bookings_by_phone(base_url, normalize_phone_number(phone))
+        result = api.get_bookings_by_phone(base_url, normalize_phone_number(phone), language=language)
     else:
         return {"status": "not_found"}
 
@@ -304,19 +310,28 @@ def lookup_appointment(
 def check_booking_status(
     state: Annotated[AgentState, InjectedState],
     ref_number: str,
+    language: str = "en",
 ) -> dict:
     """Re-fetch a booking by its reference number IMMEDIATELY before
     cancelling it - never trust anything earlier in the conversation as
-    still current. Returns:
+    still current. ALWAYS pass `language` as "ar" or "en" matching what
+    you're about to reply in (see lookup_appointment). Returns:
     {"status": "active", "appointment": {...}}
     {"status": "already_cancelled", "appointment": {...}}
-    {"status": "not_found"}"""
+    {"status": "not_found"}
+    {"status": "error"}  # the booking API call itself failed - a technical
+                          # problem, NOT the same as "booking not found"
+    """
 
     base_url = _base_url(state)
-    result = api.get_bookings_by_ref(base_url, ref_number)
+    result = api.get_bookings_by_ref(base_url, ref_number, language=language)
 
     if not result["success"]:
-        return {"status": "not_found"}
+        logger.error(
+            "check_booking_status API call failed: base_url=%s ref=%r status_code=%s error=%s",
+            base_url, ref_number, result.get("status_code"), result.get("error"),
+        )
+        return {"status": "error"}
 
     items = (result["data"] or {}).get("items", [])
     if not items:
