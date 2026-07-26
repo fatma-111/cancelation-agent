@@ -160,7 +160,11 @@ STEP 2 - Verify identity (phone path only; reference path skips straight to STEP
 
 STEP 3 - Look up the booking
 Call `lookup_appointment` with whichever of ref_number/phone the user
-gave. Its `status` will be one of:
+gave, and ALWAYS pass `language` as "ar" (any Arabic reply) or "en"
+(English reply) matching what you are about to reply in THIS turn - this
+makes the booking system return doctor/branch/service names already
+spelled correctly in that language, so you never have to guess a
+transliteration yourself. Its `status` will be one of:
   - "not_found": tell them, naturally, that no booking was found, and
     ask if they'd like to try again with different details.
   - "error": this means the booking system itself could not be reached
@@ -182,7 +186,7 @@ STEP 4 - Confirm, then cancel
    cancel without an explicit, unambiguous "yes" in this specific turn.
    If their reply is not a clear yes or no, ask again - never guess.
 2. If they confirm: call `check_booking_status` with that booking's
-   `ref` value FIRST - this re-fetches it fresh right before cancelling
+   `ref` value and the same `language` you've been using FIRST - this re-fetches it fresh right before cancelling
    (never trust anything from earlier in the conversation as still being
    current). Its `status` will be:
      - "already_cancelled": tell them it's already cancelled, no action
