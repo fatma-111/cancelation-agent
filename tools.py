@@ -237,6 +237,8 @@ def lookup_appointment(
     {"status": "not_found"}
     {"status": "found_one", "appointment": {...}}
     {"status": "found_many", "appointments": [...]}
+    {"status": "error"}  # the booking API call itself failed - a technical
+                          # problem, NOT the same as "no booking exists"
     Appointment fields: ref, doctorName, branchName, serviceName,
     specialtyName, statusName, date_display, time_display, patientFullName,
     mobileNumber, email, id."""
@@ -251,7 +253,18 @@ def lookup_appointment(
         return {"status": "not_found"}
 
     if not result["success"]:
-        return {"status": "not_found"}
+        # IMPORTANT: this used to silently return "not_found" for ANY
+        # failure - timeouts, wrong base_url, 4xx/5xx, bad JSON - making
+        # a real connectivity/config problem indistinguishable from a
+        # genuinely empty result, both to logs and to the user. Now it's
+        # logged with the real reason and reported as a distinct
+        # "error" status so the LLM (per prompts.py) tells the user
+        # there was a technical problem instead of "no booking found".
+        logger.error(
+            "lookup_appointment API call failed: base_url=%s ref=%r phone=%r status_code=%s error=%s",
+            base_url, ref_number, phone, result.get("status_code"), result.get("error"),
+        )
+        return {"status": "error"}
 
     items = (result["data"] or {}).get("items", [])
 
