@@ -168,25 +168,39 @@ def _shape_appointment(item: dict) -> dict:
 
 
 def _filter_active(items: list) -> list:
-    """Phone-path-only filter (preserved exactly from the old tools.py):
-    excludes already-cancelled and past bookings. The reference-number
-    path does NOT apply this filter - that asymmetry is intentional,
-    carried over unchanged from the original business logic."""
+    """Phone-path-only filter, applied when looking up bookings by phone
+    number so the user can choose which one to cancel.
 
-    now = datetime.utcnow()
+    CHANGED (explicit user request, based on a real dashboard screenshot):
+    "active"/cancellable no longer requires a scheduled future visit date.
+    It now means the booking's statusName indicates it HASN'T happened
+    yet - i.e. anything other than Cancelled/Completed/Arrived. This
+    specifically includes "New" bookings that don't have a visit date
+    set yet at all (shown as "-" in the dashboard) - those are still
+    perfectly cancellable and must appear.
+
+    Previously this required `bookingTimeFrom` to be set AND in the
+    future, which silently excluded every "New" booking without a
+    visit date yet - that was the actual root cause of "no booking
+    found" despite a visible, cancellable "New" row in the dashboard.
+
+    The reference-number lookup path does NOT apply this filter at all -
+    that asymmetry is unchanged, carried over from the original business
+    logic."""
+
+    excluded_statuses = {"cancelled", "completed", "arrived"}
+
     active = []
     for item in items:
         if item.get("status") == CANCELLED_STATUS_CODE:
             continue
-        raw_from = item.get("bookingTimeFrom")
-        if not raw_from:
+
+        status_name = (item.get("statusName") or "").strip().lower()
+        if status_name in excluded_statuses:
             continue
-        try:
-            dt = datetime.fromisoformat(raw_from.replace("Z", ""))
-        except ValueError:
-            continue
-        if dt > now:
-            active.append(item)
+
+        active.append(item)
+
     return active
 
 
