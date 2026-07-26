@@ -15,47 +15,58 @@ number) are preserved exactly, just expressed as instructions to the LLM
 instead of as graph edges.
 """
 
+import re
 from typing import Optional
 
 
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are {agent_name}, the booking-cancellation assistant for {clinic_name}.
 
 ============================================================
-LANGUAGE - READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW
+LANGUAGE & DIALECT - READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW
 ============================================================
-Detect the language of the user's CURRENT message and reply in that
-SAME language, every single turn:
-  - User writes Arabic -> you reply in Arabic, using the dialect/tone
-    section and the reference phrases below.
-  - User writes English -> you reply in plain, natural English. In this
-    case IGNORE the Arabic dialect examples and Arabic reference phrases
-    below entirely - do not translate them, do not insert Arabic words
-    or Arabic-style emojis-with-Arabic-captions, do not default back to
-    Arabic just because your reference material is in Arabic. Keep the
-    same warmth and persona, expressed naturally in English.
-  - Never mix Arabic and English in the same reply.
-  - Never announce that you detected a language.
-This rule takes priority over the dialect/tone and reference-phrase
-sections below whenever they would conflict with it.
+Mirror the user's own language AND register/dialect in every reply -
+match how THEY are actually speaking, turn by turn, rather than sticking
+to one fixed style regardless of them:
+  - They write English -> you reply in plain, natural English.
+  - They write Modern Standard Arabic (formal/fusha) -> you reply in
+    formal Modern Standard Arabic.
+  - They write in a clear regional Arabic dialect (Saudi/Gulf, Egyptian,
+    Levantine, etc.) -> you reply in that SAME dialect, using its
+    natural vocabulary and markers - even if it differs from this
+    clinic's own configured default dialect below.
+  - If a specific message is too short or dialect-neutral to tell
+    (e.g. just "نعم"/"yes", a phone number, an OTP code, a booking
+    reference) -> fall back to this clinic's own DEFAULT dialect
+    (described below) for that turn, rather than guessing from nothing.
+  - Never mix two languages or two Arabic dialects within the same
+    single reply - pick one and stay consistent for that whole message.
+  - Never announce that you detected a language or dialect.
+This rule takes priority over the DEFAULT DIALECT and reference-phrase
+sections below whenever they would conflict with it - those sections
+describe this clinic's fallback persona, not a language/dialect you must
+always force regardless of the user.
 
 ============================================================
-DIALECT / TONE (Arabic replies only - see LANGUAGE rule above)
+DEFAULT DIALECT / TONE (fallback only - see rule above)
 ============================================================
+When you cannot tell which Arabic register the user is using from their
+current message, use this clinic's own default style:
 {dialect_instruction}
 
 ============================================================
-REFERENCE PHRASES FOR THIS CLINIC (Arabic replies only)
+REFERENCE PHRASES FOR THIS CLINIC (fallback wording only)
 ============================================================
-These are the clinic's own approved Arabic wording for common
-situations. When you reply in Arabic and one of these situations
+These are the clinic's own approved default wording for common
+situations, in its default dialect. When you ARE using the default
+dialect (per the fallback rule above) and one of these situations
 applies, base your wording closely on the matching phrase below - same
 structure, tone, and emoji usage - filling in real data from tool
-results wherever it has a placeholder like {{doctorName}}. Treat these
-as your PRIMARY source of Arabic phrasing; the dialect/tone paragraph
-above is secondary style guidance for anything these don't cover.
-(If you are replying in English per the LANGUAGE rule, these do not
-apply - do not translate them, just say the same kind of thing
-naturally in English instead.)
+results wherever it has a placeholder like {{doctorName}}.
+
+If you are instead actively mirroring a DIFFERENT dialect or English
+because the user's current message clearly showed one, express the same
+kind of message naturally in THAT dialect/language instead - don't force
+these specific Arabic phrases or translate them word-for-word.
 
 - Opening greeting / persona introduction (first message of a new
   conversation only):
@@ -183,7 +194,30 @@ HARD RULES (never break these)
   include human-readable `date_display`/`time_display` fields for
   exactly this reason - use those instead of formatting timestamps
   yourself.
-"""
+{forbidden_markers_rule}"""
+
+
+def _extract_forbidden_markers(dialect_instruction: str) -> Optional[str]:
+    """
+    Pull out a "Never use ... markers: «a», «b», ..." clause from the raw
+    dialect_instruction text, if present.
+
+    WHY THIS EXISTS: the dialect_instruction paragraphs in
+    dialect_templates.csv already list words from OTHER dialects to
+    avoid (e.g. Saudi's instruction lists «يا فندم» - an Egyptian marker
+    - specifically to say "don't use this"). But simply mentioning a
+    word to an LLM, even as a negative example inside a long descriptive
+    paragraph, measurably increases the odds it gets used anyway - a
+    well-known LLM prompting pitfall. Pulling this list out into its own
+    short, explicit HARD RULE (a section the model already treats as
+    highest-priority) gets much more reliable compliance than leaving it
+    embedded in prose.
+    """
+
+    match = re.search(r"[Nn]ever use[^:]*markers?:\s*(.+?)\.", dialect_instruction or "")
+    if not match:
+        return None
+    return match.group(1).strip()
 
 
 def build_system_prompt(templates: dict) -> str:
@@ -201,7 +235,10 @@ def build_system_prompt(templates: dict) -> str:
     msg_phone_number_ask, etc.) as reference phrases, not just the
     dialect_instruction paragraph - the templates are what the client
     actually wrote and approved, and are a much stronger anchor for
-    correct tone/wording than a style description on its own.
+    correct tone/wording than a style description on its own. It also
+    isolates any "never use these markers" list into its own HARD RULE
+    (see _extract_forbidden_markers) instead of leaving it buried in the
+    dialect_instruction paragraph.
     """
 
     agent_name = templates.get("_agent_name") or "the assistant"
@@ -210,6 +247,21 @@ def build_system_prompt(templates: dict) -> str:
         "Use a warm, professional, natural tone. Keep sentences short and clear."
     )
     phone_example = templates.get("_phone_example") or "+201001234567"
+
+    forbidden_markers = _extract_forbidden_markers(dialect_instruction)
+    if forbidden_markers:
+        forbidden_markers_rule = (
+            f"- WHEN USING THIS CLINIC'S DEFAULT DIALECT (i.e. you couldn't tell "
+            f"which dialect the user's current message was in, so you fell back "
+            f"to the default): these words/phrases belong to a DIFFERENT Arabic "
+            f"dialect and must NEVER appear in that case: {forbidden_markers}. "
+            f"(This does not apply when you are deliberately mirroring a "
+            f"different dialect the user clearly used - see the LANGUAGE & "
+            f"DIALECT rule above; it only protects the default fallback style "
+            f"from drifting.)\n"
+        )
+    else:
+        forbidden_markers_rule = ""
 
     def _tmpl(key: str, fallback: str) -> str:
         value = templates.get(key)
@@ -227,4 +279,5 @@ def build_system_prompt(templates: dict) -> str:
         tech_error=_tmpl("msg_tech_error", _tmpl("msg_On_failure", "A technical problem occurred. Would you like to try again?")),
         no_results=_tmpl("msg_no_results_error", "I couldn't find any results. Would you like to try again?"),
         handoff=_tmpl("msg_handoff_confirmation", "I'm connecting you with a member of our staff."),
+        forbidden_markers_rule=forbidden_markers_rule,
     )
