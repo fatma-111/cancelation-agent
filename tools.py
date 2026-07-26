@@ -186,9 +186,24 @@ def _filter_active(items: list) -> list:
 
     The reference-number lookup path does NOT apply this filter at all -
     that asymmetry is unchanged, carried over from the original business
-    logic."""
+    logic.
 
-    excluded_statuses = {"cancelled", "completed", "arrived"}
+    LANGUAGE-AGNOSTIC FIX: `lookup_appointment` now passes `language`
+    through to the API (accept-language header) so doctor/branch names
+    come back correctly spelled. That almost certainly also affects
+    `statusName` itself when language="ar" is requested - the API may
+    return "مكتمل"/"ملغي"/etc. instead of "Completed"/"Cancelled". This
+    exclusion check now matches BOTH English and Arabic status labels
+    (via substring, to tolerate minor phrasing variants), instead of
+    only English - which was the actual cause of a "Completed" booking
+    still appearing in an Arabic-language conversation."""
+
+    excluded_keywords = (
+        # English
+        "cancelled", "canceled", "completed", "arrived",
+        # Arabic (substring match - tolerant of variant phrasing)
+        "ملغ", "ألغي", "مكتمل", "منتهي", "وصل", "حضر",
+    )
 
     active = []
     for item in items:
@@ -196,7 +211,7 @@ def _filter_active(items: list) -> list:
             continue
 
         status_name = (item.get("statusName") or "").strip().lower()
-        if status_name in excluded_statuses:
+        if any(keyword in status_name for keyword in excluded_keywords):
             continue
 
         active.append(item)
