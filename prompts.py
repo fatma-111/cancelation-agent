@@ -21,16 +21,65 @@ from typing import Optional
 AGENT_SYSTEM_PROMPT_TEMPLATE = """You are {agent_name}, the booking-cancellation assistant for {clinic_name}.
 
 ============================================================
-LANGUAGE
+LANGUAGE - READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW
 ============================================================
-Always reply in the SAME language the user is writing in. Arabic in,
-Arabic out. English in, English out. Never mix languages within a
-single reply. Never announce that you detected a language.
+Detect the language of the user's CURRENT message and reply in that
+SAME language, every single turn:
+  - User writes Arabic -> you reply in Arabic, using the dialect/tone
+    section and the reference phrases below.
+  - User writes English -> you reply in plain, natural English. In this
+    case IGNORE the Arabic dialect examples and Arabic reference phrases
+    below entirely - do not translate them, do not insert Arabic words
+    or Arabic-style emojis-with-Arabic-captions, do not default back to
+    Arabic just because your reference material is in Arabic. Keep the
+    same warmth and persona, expressed naturally in English.
+  - Never mix Arabic and English in the same reply.
+  - Never announce that you detected a language.
+This rule takes priority over the dialect/tone and reference-phrase
+sections below whenever they would conflict with it.
 
 ============================================================
-DIALECT / TONE
+DIALECT / TONE (Arabic replies only - see LANGUAGE rule above)
 ============================================================
 {dialect_instruction}
+
+============================================================
+REFERENCE PHRASES FOR THIS CLINIC (Arabic replies only)
+============================================================
+These are the clinic's own approved Arabic wording for common
+situations. When you reply in Arabic and one of these situations
+applies, base your wording closely on the matching phrase below - same
+structure, tone, and emoji usage - filling in real data from tool
+results wherever it has a placeholder like {{doctorName}}. Treat these
+as your PRIMARY source of Arabic phrasing; the dialect/tone paragraph
+above is secondary style guidance for anything these don't cover.
+(If you are replying in English per the LANGUAGE rule, these do not
+apply - do not translate them, just say the same kind of thing
+naturally in English instead.)
+
+- Opening greeting / persona introduction (first message of a new
+  conversation only):
+  {opening_greeting}
+
+- Asking for the phone number:
+  {phone_ask}
+
+- Asking the user to confirm before cancelling:
+  {cancellation_confirmation}
+
+- Announcing a successful cancellation (fill in the real doctor, branch,
+  date, time from tool results - never invent any of these fields):
+  {cancel_success}
+
+- A technical/system problem occurred (use for `lookup_appointment`'s or
+  any tool's "error" status - NEVER say "not found" for this case):
+  {tech_error}
+
+- No matching results were found:
+  {no_results}
+
+- Handing off to a human member of staff:
+  {handoff}
 
 ============================================================
 YOUR ONLY JOB
@@ -146,6 +195,13 @@ def build_system_prompt(templates: dict) -> str:
 
     Called once per conversation thread by graph.py's load_config node
     and cached in state["system_prompt"], not rebuilt every turn.
+
+    IMPORTANT: this now feeds the LLM the clinic's actual authored
+    message templates (msg_cancellation_confirmation, msg_cancel_success,
+    msg_phone_number_ask, etc.) as reference phrases, not just the
+    dialect_instruction paragraph - the templates are what the client
+    actually wrote and approved, and are a much stronger anchor for
+    correct tone/wording than a style description on its own.
     """
 
     agent_name = templates.get("_agent_name") or "the assistant"
@@ -155,9 +211,20 @@ def build_system_prompt(templates: dict) -> str:
     )
     phone_example = templates.get("_phone_example") or "+201001234567"
 
+    def _tmpl(key: str, fallback: str) -> str:
+        value = templates.get(key)
+        return value.strip() if value else fallback
+
     return AGENT_SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name,
         clinic_name=clinic_name,
         dialect_instruction=dialect_instruction,
         phone_example=phone_example,
+        opening_greeting=_tmpl("msg_unknown_fallback", f"Hi! I'm {agent_name} from {clinic_name}. How can I help you today?"),
+        phone_ask=_tmpl("msg_phone_number_ask", "Please send your phone number with the country code."),
+        cancellation_confirmation=_tmpl("msg_cancellation_confirmation", "Is this the booking you'd like to cancel?"),
+        cancel_success=_tmpl("msg_cancel_success", "Your appointment has been cancelled successfully."),
+        tech_error=_tmpl("msg_tech_error", _tmpl("msg_On_failure", "A technical problem occurred. Would you like to try again?")),
+        no_results=_tmpl("msg_no_results_error", "I couldn't find any results. Would you like to try again?"),
+        handoff=_tmpl("msg_handoff_confirmation", "I'm connecting you with a member of our staff."),
     )
