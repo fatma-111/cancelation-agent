@@ -193,13 +193,27 @@ def _filter_active(items: list) -> list:
     status is still "New" (e.g. a no-show never updated in the source
     system) - it can't practically be cancelled anymore. A "New" booking
     with NO visit date set at all is still included (nothing to compare
-    against - it hasn't happened by definition)."""
+    against - it hasn't happened by definition).
+
+    STATUS VOCABULARY (confirmed directly from the dashboard's status
+    dropdown): جديد (New), تم التأكيد (Confirmed), وصل (Arrived),
+    لم يحضر (No Show), مكتمل (Completed) - plus Cancelled from
+    elsewhere in the system. Only "New" and "Confirmed" are cancellable;
+    everything else means the appointment has already been resolved one
+    way or another and can no longer be meaningfully cancelled. "No Show"
+    is now an explicit, deliberate entry below - it previously only
+    happened to get excluded by accident (its Arabic text "لم يحضر"
+    contains "حضر" as a substring, which was really meant to catch
+    "وصل"/Arrived-style wording) rather than by a intentional rule."""
 
     excluded_keywords = (
         # English
-        "cancelled", "canceled", "completed", "arrived",
-        # Arabic (substring match - tolerant of variant phrasing)
-        "ملغ", "ألغي", "مكتمل", "منتهي", "وصل", "حضر",
+        "cancelled", "canceled", "completed", "arrived", "no show", "no-show",
+        # Arabic (substring match - tolerant of minor phrasing variants)
+        "ملغ", "ألغي",       # Cancelled
+        "مكتمل", "منتهي",     # Completed
+        "وصل",               # Arrived
+        "لم يحضر",           # No Show (explicit now, not just a "حضر" substring accident)
     )
 
     now = datetime.utcnow()
@@ -257,7 +271,14 @@ def compare_phone(provided_phone: str, channel_phone: str = "") -> dict:
     a = normalize_phone_number(provided_phone)
     b = normalize_phone_number(channel_phone) if channel_phone else None
 
-    if a and b and a == b:
+    match = bool(a and b and a == b)
+
+    logger.info(
+        "compare_phone: provided=%r -> normalized=%r | channel=%r -> normalized=%r | match=%s",
+        provided_phone, a, channel_phone, b, match,
+    )
+
+    if match:
         return {"status": "match"}
 
     return {"status": "no_match"}
@@ -309,6 +330,7 @@ def lookup_appointment(
 
     if use_channel_identity:
         channel_phone = state.get("channel_phone")
+        logger.info("lookup_appointment: use_channel_identity=True, channel_phone=%r", channel_phone)
         if not channel_phone:
             return {"status": "no_channel_identity"}
         phone = channel_phone
@@ -424,12 +446,34 @@ _otp_storage: Dict[str, dict] = {}
 
 
 @tool
-def send_otp(phone: str) -> dict:
+def send_otp(state: Annotated[AgentState, InjectedState], phone: str) -> dict:
     """Send an OTP code to the given phone number (the number ON FILE
     for the booking, not necessarily what the user typed). Returns
-    {"status": "otp_sent"}."""
+    {"status": "otp_sent"}, or {"status": "otp_not_needed_matches_channel"}
+    if this number turns out to match the user's own verified channel
+    identity (see note below) - in that case, treat it exactly like a
+    successful compare_phone match: skip OTP entirely and continue
+    straight to looking up the appointment.
+
+    SAFETY NET: this checks the phone number against the channel
+    identity itself before sending anything, even though you should
+    already have called `compare_phone` before ever calling this tool -
+    this is a defensive backstop in case that step was skipped, not a
+    replacement for calling `compare_phone` first."""
 
     normalized = normalize_phone_number(phone)
+
+    channel_phone = state.get("channel_phone")
+    normalized_channel = normalize_phone_number(channel_phone) if channel_phone else None
+
+    if normalized_channel and normalized and normalized_channel == normalized:
+        logger.warning(
+            "send_otp called for phone=%r which matches channel_phone=%r - "
+            "skipping OTP entirely (compare_phone should have caught this "
+            "before send_otp was ever called)",
+            normalized, normalized_channel,
+        )
+        return {"status": "otp_not_needed_matches_channel"}
 
     if OTP_PROVIDER == "authentica":
         api.authentica_send_otp(normalized)
