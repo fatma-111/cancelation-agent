@@ -23,7 +23,7 @@ from typing import Dict
 
 from langchain_core.messages import HumanMessage
 
-from config import SESSION_TIMEOUT_SECONDS, THREAD_ID_PREFIX, configure_logging
+from config import POST_SUCCESS_TIMEOUT_SECONDS, SESSION_TIMEOUT_SECONDS, THREAD_ID_PREFIX, configure_logging
 from graph import graph
 
 configure_logging()
@@ -35,15 +35,27 @@ logger = logging.getLogger(__name__)
 # ==========================================================
 #
 # Tracks, per session_id, when it last sent a message and which
-# "generation" it's currently on. If more than SESSION_TIMEOUT_SECONDS
-# has passed since the last message, the next one bumps the generation
-# counter - which changes the actual thread_id passed to the graph/
-# checkpointer, so MemorySaver treats it as a brand new, empty
-# conversation. The caller's own session_id never changes; this is
-# entirely internal bookkeeping. Consistent with MemorySaver itself,
-# this is in-process only (resets on server restart too - see README).
+# "generation" it's currently on. Two independent triggers bump the
+# generation counter - which changes the actual thread_id passed to the
+# graph/checkpointer, so MemorySaver treats it as a brand new, empty
+# conversation:
+#
+#   1. General inactivity: more than SESSION_TIMEOUT_SECONDS since the
+#      last message of any kind.
+#   2. Post-success inactivity: more than POST_SUCCESS_TIMEOUT_SECONDS
+#      since a cancellation completed successfully, with no further
+#      message in between. A quick follow-up question right after a
+#      successful cancellation does NOT reset anything and does NOT
+#      trigger the opening greeting again - it's still the same natural
+#      conversation. Only silence AFTER the success, past this shorter
+#      window, starts a fresh one.
+#
+# The caller's own session_id never changes; this is entirely internal
+# bookkeeping. Consistent with MemorySaver itself, this is in-process
+# only (resets on server restart too - see README).
 
 _last_active: Dict[str, float] = {}
+_success_at: Dict[str, float] = {}
 _generation: Dict[str, int] = {}
 
 
@@ -55,13 +67,31 @@ _now = time.time  # dedicated reference so tests can patch main._now in
 def _config_for(session_id: str) -> dict:
     now = _now()
     last = _last_active.get(session_id)
+    success = _success_at.get(session_id)
 
-    if last is not None and (now - last) > SESSION_TIMEOUT_SECONDS:
-        _generation[session_id] = _generation.get(session_id, 0) + 1
+    reset = False
+
+    if success is not None and (now - success) > POST_SUCCESS_TIMEOUT_SECONDS:
         logger.info(
-            "session_id=%s: %.0fs since last message (> %ss timeout) - starting a fresh conversation (generation %s)",
-            session_id, now - last, SESSION_TIMEOUT_SECONDS, _generation[session_id],
+            "session_id=%s: %.0fs since last successful cancellation (> %ss) with no follow-up - starting a fresh conversation",
+            session_id, now - success, POST_SUCCESS_TIMEOUT_SECONDS,
         )
+        reset = True
+    elif last is not None and (now - last) > SESSION_TIMEOUT_SECONDS:
+        logger.info(
+            "session_id=%s: %.0fs since last message (> %ss timeout) - starting a fresh conversation",
+            session_id, now - last, SESSION_TIMEOUT_SECONDS,
+        )
+        reset = True
+
+    if reset:
+        _generation[session_id] = _generation.get(session_id, 0) + 1
+    elif success is not None:
+        # A follow-up message arrived within the post-success grace
+        # window - this is an ordinary continuation of the same
+        # conversation, not a fresh one. Clear the marker; from here on
+        # only the general inactivity timeout applies again.
+        _success_at.pop(session_id, None)
 
     _last_active[session_id] = now
 
@@ -99,14 +129,13 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
     once templates are already cached for this thread).
 
     RESET BEHAVIOR: memory resets automatically in two cases -
-      1. After SESSION_TIMEOUT_SECONDS of inactivity (see _config_for).
-      2. Immediately after a cancellation completes successfully (below) -
-         a completed cancellation is a natural conversation boundary;
-         without this, a long-lived thread that already finished one
-         cancellation can carry stale context (e.g. a dialect used much
-         earlier in an unrelated test) into what the user perceives as a
-         brand new conversation, and skips the opening greeting since the
-         graph doesn't consider it "new".
+      1. After SESSION_TIMEOUT_SECONDS of general inactivity.
+      2. After POST_SUCCESS_TIMEOUT_SECONDS of no follow-up message
+         following a successful cancellation specifically (below) - NOT
+         immediately after success. A quick follow-up question right
+         after cancelling stays in the same conversation (no repeated
+         greeting); only silence past that shorter window starts fresh.
+    See _config_for() for exactly how these two triggers are evaluated.
     """
 
     state = {
@@ -118,16 +147,30 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
 
     logger.info("session_id=%s: sending message", session_id)
 
-    result = graph.invoke(state, config=_config_for(session_id))
+    thread_config = _config_for(session_id)
+
+    # Snapshot the message count BEFORE this turn, so we can isolate
+    # exactly which messages this turn added afterward - result["messages"]
+    # is the FULL accumulated history for the thread (via add_messages),
+    # not just this turn's new messages. Without this, a cancellation
+    # that succeeded several turns ago would keep being "detected" again
+    # on every subsequent turn in the same thread, endlessly re-arming
+    # the post-success reset timer.
+    existing_snapshot = graph.get_state(thread_config)
+    previous_count = len(existing_snapshot.values.get("messages", [])) if existing_snapshot.values else 0
+
+    result = graph.invoke(state, config=thread_config)
 
     reply = result["messages"][-1].content
     logger.info("session_id=%s: reply=%r", session_id, reply)
 
-    if _cancellation_just_succeeded(result["messages"]):
-        _generation[session_id] = _generation.get(session_id, 0) + 1
+    new_messages_this_turn = result["messages"][previous_count:]
+
+    if _cancellation_just_succeeded(new_messages_this_turn):
+        _success_at[session_id] = _now()
         logger.info(
-            "session_id=%s: cancellation succeeded this turn - resetting memory for the next message (generation %s)",
-            session_id, _generation[session_id],
+            "session_id=%s: cancellation succeeded this turn - will reset after %ss of no follow-up",
+            session_id, POST_SUCCESS_TIMEOUT_SECONDS,
         )
 
     return reply
