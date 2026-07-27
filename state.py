@@ -53,3 +53,15 @@ class AgentState(TypedDict):
     # ==========================================================
 
     messages: Annotated[list, add_messages]
+
+    # True once the exact opening greeting has been deterministically
+    # prepended for this thread (see graph.py's agent() node). This
+    # exists because relying on the LLM to reproduce the clinic's
+    # greeting text verbatim, every single time, turned out to be
+    # unreliable in practice (observed directly: the same clinic's
+    # greeting came out differently worded/structured across separate
+    # conversations despite explicit prompt instructions to reuse it
+    # exactly). Guaranteeing it in code removes that source of
+    # inconsistency entirely, without touching how the LLM handles
+    # anything else in the conversation.
+    greeted: bool
