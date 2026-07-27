@@ -71,6 +71,20 @@ def _config_for(session_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
+def _cancellation_just_succeeded(messages: list) -> bool:
+    """Detect whether this turn's messages include a successful
+    cancel_appointment tool call. Used to reset the session's memory
+    right after a cancellation completes - see send_message()."""
+
+    for msg in messages:
+        if getattr(msg, "name", None) == "cancel_appointment":
+            content = str(getattr(msg, "content", ""))
+            if '"status": "success"' in content or "'status': 'success'" in content:
+                return True
+
+    return False
+
+
 def send_message(client_id: str, session_id: str, message: str, channel_phone: str = None) -> str:
     """
     Send one user message for `session_id` and return the agent's reply
@@ -83,6 +97,16 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
     for this thread_id, so client_id/channel_phone only need to be
     supplied again in case they weren't set yet (load_config is a no-op
     once templates are already cached for this thread).
+
+    RESET BEHAVIOR: memory resets automatically in two cases -
+      1. After SESSION_TIMEOUT_SECONDS of inactivity (see _config_for).
+      2. Immediately after a cancellation completes successfully (below) -
+         a completed cancellation is a natural conversation boundary;
+         without this, a long-lived thread that already finished one
+         cancellation can carry stale context (e.g. a dialect used much
+         earlier in an unrelated test) into what the user perceives as a
+         brand new conversation, and skips the opening greeting since the
+         graph doesn't consider it "new".
     """
 
     state = {
@@ -98,6 +122,13 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
 
     reply = result["messages"][-1].content
     logger.info("session_id=%s: reply=%r", session_id, reply)
+
+    if _cancellation_just_succeeded(result["messages"]):
+        _generation[session_id] = _generation.get(session_id, 0) + 1
+        logger.info(
+            "session_id=%s: cancellation succeeded this turn - resetting memory for the next message (generation %s)",
+            session_id, _generation[session_id],
+        )
 
     return reply
 
