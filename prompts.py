@@ -132,10 +132,14 @@ CONVERSATION FLOW
 ============================================================
 
 STEP 1 - Identify the booking
-Ask whether they want to cancel using their booking reference number, or
-their phone number. Do not guess from their first message - always ask
-this explicitly first, in your own natural words (in their language),
-if you don't already know which one they want to use.
+Be smart about this - if the user's message ALREADY clearly contains a
+booking reference number (e.g. something like "GBN-2026-06-20-151") or
+a phone number, use that directly and skip straight to STEP 2/3 - do
+NOT ask "reference or phone?" when they've already effectively answered
+that question by giving you one of them. Only ask the "reference or
+phone number?" question when their message doesn't already contain
+either one (e.g. just "I want to cancel my appointment" or "عايز ألغي
+حجز").
 
 STEP 2 - Verify identity (phone path only; reference path skips straight to STEP 3)
 - If they gave a booking reference: skip to STEP 3.
@@ -270,6 +274,26 @@ def _extract_forbidden_markers(dialect_instruction: str) -> Optional[str]:
     return match.group(1).strip()
 
 
+# Common cross-dialect words that the CSV's own "never use X markers"
+# lists don't happen to mention, but that still leak through in
+# practice (observed directly: an Egyptian-clinic reply used «الجوال»,
+# which is a Gulf/Saudi word for "mobile phone" - the Egyptian
+# equivalent is «الموبايل» or «التليفون». Egyptian's own dialect_instruction
+# never listed «الجوال» as forbidden, so the CSV-derived rule alone
+# missed it). Keyed by the resolved dialect name (config.py's new
+# "_dialect_name" field) so this only applies to dialects that actually
+# have a known conflict - keep this list small and evidence-based, not
+# speculative.
+_SUPPLEMENTARY_FORBIDDEN_WORDS = {
+    "egyptian": ["الجوال (استخدم الموبايل أو التليفون بدالها)"],
+}
+
+
+def _supplementary_forbidden_words(dialect_name: Optional[str]) -> Optional[str]:
+    words = _SUPPLEMENTARY_FORBIDDEN_WORDS.get((dialect_name or "").strip().lower())
+    return ", ".join(words) if words else None
+
+
 def build_system_prompt(templates: dict) -> str:
     """
     Build the full system prompt for a given tenant, from the merged
@@ -288,7 +312,9 @@ def build_system_prompt(templates: dict) -> str:
     correct tone/wording than a style description on its own. It also
     isolates any "never use these markers" list into its own HARD RULE
     (see _extract_forbidden_markers) instead of leaving it buried in the
-    dialect_instruction paragraph.
+    dialect_instruction paragraph, and layers in a small, evidence-based
+    supplementary list (_SUPPLEMENTARY_FORBIDDEN_WORDS) for real leaks
+    observed in production that the CSV's own list doesn't cover.
     """
 
     agent_name = templates.get("_agent_name") or "the assistant"
@@ -299,12 +325,16 @@ def build_system_prompt(templates: dict) -> str:
     phone_example = templates.get("_phone_example") or "+201001234567"
 
     forbidden_markers = _extract_forbidden_markers(dialect_instruction)
-    if forbidden_markers:
+    supplementary = _supplementary_forbidden_words(templates.get("_dialect_name"))
+
+    combined_forbidden = ", ".join(w for w in (forbidden_markers, supplementary) if w)
+
+    if combined_forbidden:
         forbidden_markers_rule = (
             f"- WHEN USING THIS CLINIC'S DEFAULT DIALECT (i.e. you couldn't tell "
             f"which dialect the user's current message was in, so you fell back "
             f"to the default): these words/phrases belong to a DIFFERENT Arabic "
-            f"dialect and must NEVER appear in that case: {forbidden_markers}. "
+            f"dialect and must NEVER appear in that case: {combined_forbidden}. "
             f"(This does not apply when you are deliberately mirroring a "
             f"different dialect the user clearly used - see the LANGUAGE & "
             f"DIALECT rule above; it only protects the default fallback style "
