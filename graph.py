@@ -38,6 +38,7 @@ or needs to ask the user something.
 
 import logging
 import re
+from typing import Optional
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -99,6 +100,58 @@ _MORNING_CUES = ("صباح", "good morning", "morning")
 _EVENING_CUES = ("مساء", "good evening", "evening")
 
 
+_ENGLISH_GREETING_TEMPLATE = (
+    "{salutation}\n"
+    "I'm {agent_name}, the virtual assistant at {clinic_name}, and I'm happy to help you today.\n"
+    "I can help you with:\n"
+    "\U0001F5D3\uFE0F Booking a new appointment\n"
+    "\u270F\uFE0F Modifying or cancelling an existing appointment\n"
+    "\U0001FA7A Medical guidance to choose the right specialty or doctor\n"
+    "\u2139\uFE0F Questions about the hospital's services and doctors\n"
+    "\U0001F464 Speaking with a customer service representative\n\n"
+    "How can I help you today? \U0001F60A"
+)
+
+
+def _build_greeting(templates: dict, user_message: str, target_language: str) -> str:
+    """
+    Build the deterministic opening greeting for this conversation.
+
+    For Arabic (or undetermined) conversations, this is the clinic's own
+    CSV-authored `msg_unknown_fallback` text, verbatim, with only its
+    fixed opening line optionally swapped for a time-of-day salutation
+    (see _personalized_greeting).
+
+    For English conversations, there is no English column in the CSV to
+    reuse, so a fixed English template - built here, following the exact
+    same structure (persona intro, service list, closing question) as
+    the Arabic one - is used instead, so English speakers ALSO get a
+    consistent, deterministic greeting rather than one freely composed
+    by the LLM each time.
+    """
+
+    if target_language == "en":
+        lowered = (user_message or "").lower()
+        if any(cue in lowered for cue in _MORNING_CUES):
+            salutation = "Good morning! \U0001F60A"
+        elif any(cue in lowered for cue in _EVENING_CUES):
+            salutation = "Good evening! \U0001F60A"
+        else:
+            salutation = "Hi there! \U0001F44B"
+
+        return _ENGLISH_GREETING_TEMPLATE.format(
+            salutation=salutation,
+            agent_name=templates.get("_agent_name") or "the assistant",
+            clinic_name=templates.get("_clinic_name") or "the clinic",
+        )
+
+    greeting = templates.get("msg_unknown_fallback")
+    if not greeting:
+        return ""
+
+    return _personalized_greeting(greeting, user_message, target_language)
+
+
 def _personalized_greeting(greeting: str, user_message: str, language_hint: str) -> str:
     """
     Swap ONLY the official greeting's fixed opening line ("أهلاً بيك 👋" /
@@ -130,6 +183,69 @@ def _looks_arabic(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text or ""))
 
 
+def _has_latin_letters(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z]{2,}", text or ""))
+
+
+def _detect_target_language(messages: list) -> Optional[str]:
+    """
+    Determine which language THIS reply must be in, deterministically -
+    by code, not left to the LLM to infer from a long system prompt.
+
+    Scans the conversation's HumanMessages, most recent first, and
+    returns "ar"/"en" based on the first one that gives a clear signal
+    (Arabic script, or Latin letters). A message with neither (e.g. just
+    digits like an OTP code, or "yes"/"نعم") is skipped in favor of an
+    earlier message that does give a signal - this is what keeps the
+    established language consistent through dialect-neutral replies
+    without resetting.
+
+    Returns None only if NO message in the whole conversation gives any
+    signal at all (extremely unlikely in practice) - in that case the
+    system prompt's own default dialect applies unmodified.
+
+    WHY THIS EXISTS: relying solely on the LANGUAGE & DIALECT prose rule
+    inside the (long, Arabic-reference-heavy) system prompt measurably
+    did not reliably keep the reply in the user's actual language,
+    including on a conversation that was purely English from its very
+    first message - a plain prose instruction competing with thousands
+    of characters of Arabic reference material was not a strong enough
+    signal on its own.
+    """
+
+    for msg in reversed(messages):
+        if getattr(msg, "type", None) != "human":
+            continue
+        content = msg.content or ""
+        if _looks_arabic(content):
+            return "ar"
+        if _has_latin_letters(content):
+            return "en"
+
+    return None
+
+
+_LANGUAGE_DIRECTIVE = {
+    "en": (
+        "============================================================\n"
+        "MANDATORY LANGUAGE FOR THIS REPLY: ENGLISH\n"
+        "============================================================\n"
+        "This entire reply must be written in English only. Do not use "
+        "any Arabic words, letters, or Arabic-script emoji captions "
+        "anywhere in it. Ignore the Arabic dialect/reference-phrase "
+        "sections further below for this reply - they do not apply.\n\n"
+    ),
+    "ar": (
+        "============================================================\n"
+        "MANDATORY LANGUAGE FOR THIS REPLY: ARABIC\n"
+        "============================================================\n"
+        "This entire reply must be written in Arabic, following the "
+        "dialect/tone and reference phrases further below. Do not use "
+        "any English words anywhere in it.\n\n"
+    ),
+}
+
+
 def agent(state: AgentState) -> dict:
     """Calls the LLM with the cached system prompt + full chat history.
     The LLM decides whether to call a tool or reply directly.
@@ -152,9 +268,21 @@ def agent(state: AgentState) -> dict:
     reference/phone number before the user has actually said they want
     to cancel something - a bare greeting like "صباح الخير" states no
     intent yet, so the reply should be the greeting's own closing
-    question only, waiting for the user's actual next message."""
+    question only, waiting for the user's actual next message.
 
-    system_content = state["system_prompt"]
+    DETERMINISTIC LANGUAGE DIRECTIVE: which language this reply must be
+    in is computed by code (_detect_target_language) from the
+    conversation's actual messages and placed at the very TOP of the
+    system message - not left to the prose LANGUAGE & DIALECT rule
+    buried inside the (long) system prompt, which measurably was not a
+    strong enough signal on its own to keep replies in the user's actual
+    language, even for a conversation that had been purely English from
+    its first message."""
+
+    target_language = _detect_target_language(state["messages"])
+    language_directive = _LANGUAGE_DIRECTIVE.get(target_language, "")
+
+    system_content = language_directive + state["system_prompt"]
 
     if not state.get("greeted"):
         system_content += (
@@ -164,19 +292,19 @@ def agent(state: AgentState) -> dict:
             "This is the first message of a new conversation. The opening "
             "greeting/persona introduction has ALREADY been (or will be) sent "
             "separately, outside of what you write here. Do NOT write any "
-            "greeting, self-introduction, or generic opener of your own "
-            "(no 'صباح النور'/'مساء النور'/'Hello! How can I help?' or "
-            "similar).\n\n"
+            "greeting, self-introduction, or generic opener of your own, in "
+            "any language (no 'صباح النور'/'مساء النور'/'Hi there! How can I "
+            "help?' or similar).\n\n"
             "IMPORTANT - do not jump ahead: if the user's message is just a "
             "greeting or small talk with no stated intent yet (e.g. "
-            "'صباح الخير', 'hi', 'مرحبا', with nothing else), do NOT ask "
-            "about a booking reference or phone number yet - you don't know "
-            "they want to cancel anything yet. In that case, simply write "
-            "NOTHING here (an empty reply is fine) and let the greeting's own "
-            "closing question stand on its own, waiting for them to say what "
-            "they need. Only start STEP 1 (asking to identify the booking) "
-            "once the user's message actually indicates they want to cancel "
-            "an appointment."
+            "'صباح الخير', 'hi', 'مرحبا', 'good morning', with nothing else), "
+            "do NOT ask about a booking reference or phone number yet - you "
+            "don't know they want to cancel anything yet. In that case, "
+            "simply write NOTHING here (an empty reply is fine) and let the "
+            "greeting's own closing question stand on its own, waiting for "
+            "them to say what they need. Only start STEP 1 (asking to "
+            "identify the booking) once the user's message actually "
+            "indicates they want to cancel an appointment."
         )
 
     system_message = SystemMessage(content=system_content)
@@ -187,15 +315,12 @@ def agent(state: AgentState) -> dict:
     has_tool_calls = bool(getattr(response, "tool_calls", None))
 
     if not has_tool_calls and not state.get("greeted"):
-        greeting = (state.get("templates") or {}).get("msg_unknown_fallback")
+        first_user_message = state["messages"][0].content if state["messages"] else ""
+        greeting = _build_greeting(state.get("templates") or {}, first_user_message, target_language or "ar")
 
-        if greeting:
-            first_user_message = state["messages"][0].content if state["messages"] else ""
-            greeting = _personalized_greeting(greeting, first_user_message, "")
-
-            if greeting.strip() not in (response.content or ""):
-                combined = f"{greeting.strip()}\n\n{response.content}".strip() if response.content else greeting.strip()
-                response = AIMessage(content=combined)
+        if greeting and greeting.strip() not in (response.content or ""):
+            combined = f"{greeting.strip()}\n\n{response.content}".strip() if response.content else greeting.strip()
+            response = AIMessage(content=combined)
 
         updates["greeted"] = True
 
