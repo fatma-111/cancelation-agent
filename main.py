@@ -18,18 +18,57 @@ implementation necessarily changed along with the graph shape.
 """
 
 import logging
+import time
+from typing import Dict
 
 from langchain_core.messages import HumanMessage
 
-from config import THREAD_ID_PREFIX, configure_logging
+from config import SESSION_TIMEOUT_SECONDS, THREAD_ID_PREFIX, configure_logging
 from graph import graph
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
 
+# ==========================================================
+# Inactivity-based reset
+# ==========================================================
+#
+# Tracks, per session_id, when it last sent a message and which
+# "generation" it's currently on. If more than SESSION_TIMEOUT_SECONDS
+# has passed since the last message, the next one bumps the generation
+# counter - which changes the actual thread_id passed to the graph/
+# checkpointer, so MemorySaver treats it as a brand new, empty
+# conversation. The caller's own session_id never changes; this is
+# entirely internal bookkeeping. Consistent with MemorySaver itself,
+# this is in-process only (resets on server restart too - see README).
+
+_last_active: Dict[str, float] = {}
+_generation: Dict[str, int] = {}
+
+
+_now = time.time  # dedicated reference so tests can patch main._now in
+                  # isolation, without affecting time.time() globally
+                  # (which LangGraph's own internals also call)
+
+
 def _config_for(session_id: str) -> dict:
-    return {"configurable": {"thread_id": f"{THREAD_ID_PREFIX}:{session_id}"}}
+    now = _now()
+    last = _last_active.get(session_id)
+
+    if last is not None and (now - last) > SESSION_TIMEOUT_SECONDS:
+        _generation[session_id] = _generation.get(session_id, 0) + 1
+        logger.info(
+            "session_id=%s: %.0fs since last message (> %ss timeout) - starting a fresh conversation (generation %s)",
+            session_id, now - last, SESSION_TIMEOUT_SECONDS, _generation[session_id],
+        )
+
+    _last_active[session_id] = now
+
+    generation = _generation.get(session_id, 0)
+    thread_id = f"{THREAD_ID_PREFIX}:{session_id}:{generation}" if generation else f"{THREAD_ID_PREFIX}:{session_id}"
+
+    return {"configurable": {"thread_id": thread_id}}
 
 
 def send_message(client_id: str, session_id: str, message: str, channel_phone: str = None) -> str:
