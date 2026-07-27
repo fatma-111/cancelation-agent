@@ -37,6 +37,7 @@ or needs to ask the user something.
 """
 
 import logging
+import re
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -94,6 +95,41 @@ def load_config(state: AgentState) -> AgentState:
     return state
 
 
+_MORNING_CUES = ("صباح", "good morning", "morning")
+_EVENING_CUES = ("مساء", "good evening", "evening")
+
+
+def _personalized_greeting(greeting: str, user_message: str, language_hint: str) -> str:
+    """
+    Swap ONLY the official greeting's fixed opening line ("أهلاً بيك 👋" /
+    "أهلاً وسهلاً بك 👋") for a time-of-day salutation ("صباح النور!"/
+    "مساء النور!"/"Good morning!"/"Good evening!") when the user's own
+    first message clearly signals one - keeping the entire rest of the
+    template (persona intro, service list, closing question) exactly as
+    authored. Falls back to the original fixed opening line unchanged
+    when the user's message doesn't give a clear time-of-day cue (e.g. a
+    booking reference, a plain "hi", or anything else neutral).
+    """
+
+    lowered = (user_message or "").lower()
+
+    if any(cue in lowered for cue in _MORNING_CUES):
+        salutation = "صباح النور! 😊" if _looks_arabic(user_message) else "Good morning! 😊"
+    elif any(cue in lowered for cue in _EVENING_CUES):
+        salutation = "مساء النور! 😊" if _looks_arabic(user_message) else "Good evening! 😊"
+    else:
+        return greeting  # no clear time-of-day cue - use the template's own opening line as-is
+
+    lines = greeting.split("\n", 1)
+    if len(lines) == 2:
+        return f"{salutation}\n{lines[1]}"
+    return salutation
+
+
+def _looks_arabic(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text or ""))
+
+
 def agent(state: AgentState) -> dict:
     """Calls the LLM with the cached system prompt + full chat history.
     The LLM decides whether to call a tool or reply directly.
@@ -106,15 +142,17 @@ def agent(state: AgentState) -> dict:
     added because relying on the LLM alone measurably did not keep the
     greeting's exact wording/structure consistent across separate
     conversations, despite explicit instructions to reuse it verbatim.
+    The opening line specifically is swapped for a time-of-day salutation
+    when the user's own first message signals one (see
+    _personalized_greeting) - the rest of the template is untouched.
 
     DOUBLE-GREETING FIX: on the first turn, the LLM is ALSO told, via an
     extra instruction appended to the system message, not to write any
-    greeting/opener of its own - it should respond only to the user's
-    actual message, as if the greeting had already been handled. Without
-    this, the LLM would often still produce its own short greeting-style
-    opener ("صباح النور! ...") alongside the deterministically-prepended
-    official one, producing two different-looking greetings back to
-    back in the same reply (observed directly in production)."""
+    greeting/opener of its own, AND not to jump ahead into asking about a
+    reference/phone number before the user has actually said they want
+    to cancel something - a bare greeting like "صباح الخير" states no
+    intent yet, so the reply should be the greeting's own closing
+    question only, waiting for the user's actual next message."""
 
     system_content = state["system_prompt"]
 
@@ -128,8 +166,17 @@ def agent(state: AgentState) -> dict:
             "separately, outside of what you write here. Do NOT write any "
             "greeting, self-introduction, or generic opener of your own "
             "(no 'صباح النور'/'مساء النور'/'Hello! How can I help?' or "
-            "similar) - go straight to addressing whatever the user actually "
-            "said, exactly as you would on any other turn of the conversation."
+            "similar).\n\n"
+            "IMPORTANT - do not jump ahead: if the user's message is just a "
+            "greeting or small talk with no stated intent yet (e.g. "
+            "'صباح الخير', 'hi', 'مرحبا', with nothing else), do NOT ask "
+            "about a booking reference or phone number yet - you don't know "
+            "they want to cancel anything yet. In that case, simply write "
+            "NOTHING here (an empty reply is fine) and let the greeting's own "
+            "closing question stand on its own, waiting for them to say what "
+            "they need. Only start STEP 1 (asking to identify the booking) "
+            "once the user's message actually indicates they want to cancel "
+            "an appointment."
         )
 
     system_message = SystemMessage(content=system_content)
@@ -142,8 +189,13 @@ def agent(state: AgentState) -> dict:
     if not has_tool_calls and not state.get("greeted"):
         greeting = (state.get("templates") or {}).get("msg_unknown_fallback")
 
-        if greeting and greeting.strip() not in (response.content or ""):
-            response = AIMessage(content=f"{greeting.strip()}\n\n{response.content}")
+        if greeting:
+            first_user_message = state["messages"][0].content if state["messages"] else ""
+            greeting = _personalized_greeting(greeting, first_user_message, "")
+
+            if greeting.strip() not in (response.content or ""):
+                combined = f"{greeting.strip()}\n\n{response.content}".strip() if response.content else greeting.strip()
+                response = AIMessage(content=combined)
 
         updates["greeted"] = True
 
