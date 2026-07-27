@@ -199,7 +199,7 @@ POST_SUCCESS_TIMEOUT_SECONDS: int = int(os.getenv("POST_SUCCESS_TIMEOUT_SECONDS"
 # ==========================================================
 
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # matches OpenAI - Cancel1
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4.1")  # upgraded from gpt-4.1-mini for better dialect/persona instruction-following
 OPENAI_TIMEOUT_SECONDS: float = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "10"))
 
 # LLM classification is only attempted if an API key is present. Without
