@@ -188,15 +188,12 @@ def _filter_active(items: list) -> list:
     that asymmetry is unchanged, carried over from the original business
     logic.
 
-    LANGUAGE-AGNOSTIC FIX: `lookup_appointment` now passes `language`
-    through to the API (accept-language header) so doctor/branch names
-    come back correctly spelled. That almost certainly also affects
-    `statusName` itself when language="ar" is requested - the API may
-    return "مكتمل"/"ملغي"/etc. instead of "Completed"/"Cancelled". This
-    exclusion check now matches BOTH English and Arabic status labels
-    (via substring, to tolerate minor phrasing variants), instead of
-    only English - which was the actual cause of a "Completed" booking
-    still appearing in an Arabic-language conversation."""
+    ADDED BACK (explicit follow-up request): a booking with a scheduled
+    visit date that has already passed must be excluded too, even if its
+    status is still "New" (e.g. a no-show never updated in the source
+    system) - it can't practically be cancelled anymore. A "New" booking
+    with NO visit date set at all is still included (nothing to compare
+    against - it hasn't happened by definition)."""
 
     excluded_keywords = (
         # English
@@ -204,6 +201,8 @@ def _filter_active(items: list) -> list:
         # Arabic (substring match - tolerant of variant phrasing)
         "ملغ", "ألغي", "مكتمل", "منتهي", "وصل", "حضر",
     )
+
+    now = datetime.utcnow()
 
     active = []
     for item in items:
@@ -213,6 +212,15 @@ def _filter_active(items: list) -> list:
         status_name = (item.get("statusName") or "").strip().lower()
         if any(keyword in status_name for keyword in excluded_keywords):
             continue
+
+        raw_from = item.get("bookingTimeFrom")
+        if raw_from:
+            try:
+                dt = datetime.fromisoformat(raw_from.replace("Z", ""))
+                if dt <= now:
+                    continue  # has a scheduled date, and it's already passed
+            except ValueError:
+                pass  # unparsable date - don't let a bad format hide an otherwise-active booking
 
         active.append(item)
 
