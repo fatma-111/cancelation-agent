@@ -83,7 +83,7 @@ DIALECT_TEMPLATES_CSV: Path = DATA_DIR / "dialect_templates.csv"
 # os.getenv(..., default) - we need to distinguish "not set" from "set
 # to the default" to know whether the env var should override the CSV).
 
-_DEFAULT_BASE_URL: str = "https://demo.catalystsystems.io:1102"
+_DEFAULT_BASE_URL: str = "https://demo.catalystsystems.io:1101"
 
 _ENV_BASE_URL_OVERRIDE: Optional[str] = os.getenv("BOOKING_API_BASE_URL") or None
 
@@ -109,6 +109,23 @@ REQUEST_TIMEOUT_SECONDS: float = float(
 
 CANCELLED_STATUS_NAME: str = "Cancelled"
 CANCELLED_STATUS_CODE: int = 6
+
+# Official numeric status codes, confirmed directly from the Booking
+# API's own documentation - these replace the earlier fragile approach
+# of matching statusName strings (which had to handle both English AND
+# Arabic spellings depending on the accept-language header, and broke at
+# least once in practice). Numeric codes are language-independent.
+STATUS_NEW: int = 1
+STATUS_CONFIRMED: int = 2
+STATUS_ARRIVED: int = 3
+STATUS_NO_SHOW: int = 4
+STATUS_COMPLETED: int = 5
+STATUS_CANCELLED: int = 6
+
+# Only these two are cancellable - confirmed directly from the
+# dashboard's own status dropdown (جديد/تم التأكيد were the only ones NOT
+# excluded; وصل/لم يحضر/مكتمل/ملغي were all excluded).
+CANCELLABLE_STATUS_CODES = (STATUS_NEW, STATUS_CONFIRMED)
 
 # Statuses considered cancellable by build_response / check_booking_status.
 # The original sub-workflows only ever check for "already Cancelled" (not
