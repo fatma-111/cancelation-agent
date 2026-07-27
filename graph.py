@@ -72,13 +72,19 @@ _llm_with_tools = _llm.bind_tools(tools.ALL_TOOLS)
 
 def load_config(state: AgentState) -> AgentState:
     """Loads client_config.csv/dialect_templates.csv (config.get_messages,
-    UNCHANGED) and builds the system prompt ONCE per thread. Subsequent
-    turns on the same thread skip this (state["templates"] already set by
-    the checkpointer's persisted state), so CSV lookups happen once per
-    conversation, not once per message."""
+    UNCHANGED) and builds the system prompt EVERY turn.
 
-    if state.get("templates"):
-        return state
+    CHANGED: this used to skip rebuilding once state["templates"] was
+    already set for a thread (a caching optimization). The real-world
+    cost of that: any update to prompts.py or the CSVs would NEVER take
+    effect for a conversation already in progress - only brand new
+    threads picked it up - which is exactly what caused a live
+    conversation to keep using stale, pre-fix wording long after
+    multiple prompt improvements had already been deployed. Rebuilding
+    every turn is cheap (in-memory CSV lookups, already cached at the
+    row level by config.py's lru_cache, plus plain string formatting -
+    no network calls), so there's no real performance reason to keep
+    the old per-thread caching."""
 
     templates = config.get_messages(state["client_id"])
 
