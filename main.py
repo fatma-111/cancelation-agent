@@ -138,13 +138,6 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
     See _config_for() for exactly how these two triggers are evaluated.
     """
 
-    state = {
-        "client_id": client_id,
-        "session_id": session_id,
-        "channel_phone": channel_phone,
-        "messages": [HumanMessage(content=message)],
-    }
-
     logger.info("session_id=%s: sending message", session_id)
 
     thread_config = _config_for(session_id)
@@ -157,7 +150,28 @@ def send_message(client_id: str, session_id: str, message: str, channel_phone: s
     # on every subsequent turn in the same thread, endlessly re-arming
     # the post-success reset timer.
     existing_snapshot = graph.get_state(thread_config)
+    is_new_thread = not existing_snapshot.values
     previous_count = len(existing_snapshot.values.get("messages", [])) if existing_snapshot.values else 0
+
+    state = {
+        "client_id": client_id,
+        "session_id": session_id,
+        "channel_phone": channel_phone,
+        "messages": [HumanMessage(content=message)],
+    }
+
+    if is_new_thread:
+        # Seed "greeted" only on a genuinely brand-new thread. Providing
+        # it on EVERY turn would reset it back to False each time (state
+        # channels use "last write wins" by default) - undoing the
+        # persistence this field exists for. Omitting it on the very
+        # first turn, on the other hand, left it completely absent from
+        # state until agent() got around to setting it - which broke
+        # InjectedState's strict validation for any TOOL CALL made
+        # before that point (e.g. a first message that goes straight to
+        # check_booking_status/cancel_appointment without a preceding
+        # plain-text reply).
+        state["greeted"] = False
 
     result = graph.invoke(state, config=thread_config)
 
