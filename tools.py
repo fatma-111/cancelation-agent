@@ -260,23 +260,50 @@ def lookup_appointment(
     state: Annotated[AgentState, InjectedState],
     ref_number: str = "",
     phone: str = "",
+    use_channel_identity: bool = False,
     language: str = "en",
 ) -> dict:
-    """Look up bookings by reference number OR phone number (whichever is
-    given). ALWAYS pass `language` as "ar" if you are about to reply to
-    the user in Arabic (any dialect), or "en" if replying in English -
-    this makes the booking system return doctor/branch/service names
-    already spelled correctly in that language, so you never have to
-    translate or transliterate a name yourself (which risks misspelling
-    it). Returns one of:
+    """Look up bookings by reference number OR phone number.
+
+    If the user chose to cancel by phone number and a verified channel
+    identity (e.g. their WhatsApp number) is already known, call this
+    with `use_channel_identity=True` and leave `phone` empty - this
+    automatically searches using that verified number WITHOUT you ever
+    needing to ask the user to type it, and WITHOUT you ever seeing the
+    actual digits yourself. Any booking found this way is by definition
+    already verified (it was found using their own verified channel
+    number), so NO OTP is ever needed in this case - skip straight to
+    STEP 3/4 of the flow.
+
+    Only ask the user to type a phone number, and only then go through
+    compare_phone/OTP, if `use_channel_identity` returns "no_channel_identity"
+    (there is none available) or if the user explicitly says the booking
+    is under a DIFFERENT number than the one they're messaging from.
+
+    ALWAYS pass `language` as "ar" if you are about to reply to the user
+    in Arabic (any dialect), or "en" if replying in English - this makes
+    the booking system return doctor/branch/service names already
+    spelled correctly in that language, so you never have to translate
+    or transliterate a name yourself (which risks misspelling it).
+
+    Returns one of:
     {"status": "not_found"}
     {"status": "found_one", "appointment": {...}}
     {"status": "found_many", "appointments": [...]}
     {"status": "error"}  # the booking API call itself failed - a technical
                           # problem, NOT the same as "no booking exists"
+    {"status": "no_channel_identity"}  # use_channel_identity was True but
+                          # no verified channel number is available - ask
+                          # the user to type their phone number instead
     Appointment fields: ref, doctorName, branchName, serviceName,
     specialtyName, statusName, date_display, time_display, patientFullName,
     mobileNumber, email, id."""
+
+    if use_channel_identity:
+        channel_phone = state.get("channel_phone")
+        if not channel_phone:
+            return {"status": "no_channel_identity"}
+        phone = channel_phone
 
     base_url = _base_url(state)
 
