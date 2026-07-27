@@ -185,6 +185,13 @@ THREAD_ID_PREFIX: str = "guest-cancel"
 # of resuming the old one - see main.py's send_message().
 SESSION_TIMEOUT_SECONDS: int = int(os.getenv("SESSION_TIMEOUT_SECONDS", "3600"))  # 1 hour
 
+# Shorter grace period specifically after a cancellation completes
+# successfully: if no follow-up message arrives within this window, the
+# NEXT message starts fresh. A follow-up within this window continues
+# the same conversation as normal (no repeated greeting). See main.py's
+# _config_for()/_cancellation_just_succeeded().
+POST_SUCCESS_TIMEOUT_SECONDS: int = int(os.getenv("POST_SUCCESS_TIMEOUT_SECONDS", "600"))  # 10 minutes
+
 
 # ==========================================================
 # OpenAI (language/dialect detection, ref/phone extraction, selection
@@ -350,6 +357,7 @@ def get_messages(client_id: str, dialect: Optional[str] = None) -> dict:
     merged["_base_url"] = _ENV_BASE_URL_OVERRIDE or client_row.get("base_url") or BASE_URL
     merged["_phone_example"] = client_row.get("phone_example")
     merged["_country_codes_hint"] = client_row.get("country_codes_hint")
+    merged["_dialect_name"] = effective_dialect
     merged["_dialect_instruction"] = dialect_row.get("dialect_instruction") or client_row.get(
         "dialect_instruction"
     )
