@@ -53,8 +53,8 @@ def health() -> dict:
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     logger.info(
-        "Incoming /chat session_id=%s client_id=%s message=%r",
-        req.session_id, req.client_id, req.message,
+        "Incoming /chat session_id=%s client_id=%s message=%r channel_phone=%r",
+        req.session_id, req.client_id, req.message, req.channel_phone,
     )
 
     try:
