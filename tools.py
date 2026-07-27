@@ -37,7 +37,7 @@ from langgraph.prebuilt import InjectedState
 import api
 from config import (
     BOOKING_TIME_UTC_OFFSET_HOURS,
-    CANCELLED_STATUS_CODE,
+    CANCELLABLE_STATUS_CODES,
     CANCELLED_STATUS_NAME,
     DEFAULT_COUNTRY_CODE,
     OTP_PROVIDER,
@@ -195,37 +195,35 @@ def _filter_active(items: list) -> list:
     with NO visit date set at all is still included (nothing to compare
     against - it hasn't happened by definition).
 
-    STATUS VOCABULARY (confirmed directly from the dashboard's status
-    dropdown): جديد (New), تم التأكيد (Confirmed), وصل (Arrived),
-    لم يحضر (No Show), مكتمل (Completed) - plus Cancelled from
-    elsewhere in the system. Only "New" and "Confirmed" are cancellable;
-    everything else means the appointment has already been resolved one
-    way or another and can no longer be meaningfully cancelled. "No Show"
-    is now an explicit, deliberate entry below - it previously only
-    happened to get excluded by accident (its Arabic text "لم يحضر"
-    contains "حضر" as a substring, which was really meant to catch
-    "وصل"/Arrived-style wording) rather than by a intentional rule."""
+    STATUS CODES (confirmed directly from the Booking API's own
+    documentation): New=1, Confirmed=2, Arrived=3, NoShow=4, Completed=5,
+    Cancelled=6. Only New/Confirmed are cancellable. This now checks the
+    NUMERIC `status` field as the primary, reliable mechanism (language-
+    independent - no more guessing at Arabic vs English spelling), with
+    the earlier string-based `statusName` matching kept only as a
+    fallback for the rare item that might be missing a numeric status
+    for some reason."""
 
-    excluded_keywords = (
-        # English
+    _excluded_keywords = (
         "cancelled", "canceled", "completed", "arrived", "no show", "no-show",
-        # Arabic (substring match - tolerant of minor phrasing variants)
-        "ملغ", "ألغي",       # Cancelled
-        "مكتمل", "منتهي",     # Completed
-        "وصل",               # Arrived
-        "لم يحضر",           # No Show (explicit now, not just a "حضر" substring accident)
+        "ملغ", "ألغي", "مكتمل", "منتهي", "وصل", "لم يحضر",
     )
 
     now = datetime.utcnow()
 
     active = []
     for item in items:
-        if item.get("status") == CANCELLED_STATUS_CODE:
-            continue
+        status_code = item.get("status")
 
-        status_name = (item.get("statusName") or "").strip().lower()
-        if any(keyword in status_name for keyword in excluded_keywords):
-            continue
+        if status_code is not None:
+            if status_code not in CANCELLABLE_STATUS_CODES:
+                continue
+        else:
+            # No numeric status on this item at all - fall back to the
+            # string-based check as a defense-in-depth safety net.
+            status_name = (item.get("statusName") or "").strip().lower()
+            if any(keyword in status_name for keyword in _excluded_keywords):
+                continue
 
         raw_from = item.get("bookingTimeFrom")
         if raw_from:
@@ -340,7 +338,10 @@ def lookup_appointment(
     if ref_number:
         result = api.get_bookings_by_ref(base_url, ref_number, language=language)
     elif phone:
-        result = api.get_bookings_by_phone(base_url, normalize_phone_number(phone), language=language)
+        result = api.get_bookings_by_phone(
+            base_url, normalize_phone_number(phone), language=language,
+            status_list=list(CANCELLABLE_STATUS_CODES),
+        )
     else:
         return {"status": "not_found"}
 
