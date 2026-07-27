@@ -38,7 +38,7 @@ or needs to ask the user something.
 
 import logging
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -96,12 +96,37 @@ def load_config(state: AgentState) -> AgentState:
 
 def agent(state: AgentState) -> dict:
     """Calls the LLM with the cached system prompt + full chat history.
-    The LLM decides whether to call a tool or reply directly."""
+    The LLM decides whether to call a tool or reply directly.
+
+    GREETING GUARANTEE: if this call produces a final reply (no
+    tool_calls, i.e. this turn is about to end) and the conversation
+    hasn't been greeted yet, the clinic's exact opening greeting text is
+    deterministically prepended in code - not left to the LLM to
+    reproduce from the system prompt's reference phrases. This was
+    added because relying on the LLM alone measurably did not keep the
+    greeting's exact wording/structure consistent across separate
+    conversations, despite explicit instructions to reuse it verbatim.
+    This does not change how the LLM handles anything else - only this
+    one, always-first message is guaranteed byte-for-byte."""
 
     system_message = SystemMessage(content=state["system_prompt"])
     response = _llm_with_tools.invoke([system_message] + state["messages"])
 
-    return {"messages": [response]}
+    updates: dict = {}
+
+    has_tool_calls = bool(getattr(response, "tool_calls", None))
+
+    if not has_tool_calls and not state.get("greeted"):
+        greeting = (state.get("templates") or {}).get("msg_unknown_fallback")
+
+        if greeting and greeting.strip() not in (response.content or ""):
+            response = AIMessage(content=f"{greeting.strip()}\n\n{response.content}")
+
+        updates["greeted"] = True
+
+    updates["messages"] = [response]
+
+    return updates
 
 
 def route_after_agent(state: AgentState) -> str:
