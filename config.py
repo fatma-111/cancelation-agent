@@ -180,6 +180,11 @@ MAX_CONFIRMATION_RETRIES: int = 2
 
 THREAD_ID_PREFIX: str = "guest-cancel"
 
+# After this many seconds of no message on a given session_id, the next
+# message starts a completely fresh conversation (new thread_id) instead
+# of resuming the old one - see main.py's send_message().
+SESSION_TIMEOUT_SECONDS: int = int(os.getenv("SESSION_TIMEOUT_SECONDS", "3600"))  # 1 hour
+
 
 # ==========================================================
 # OpenAI (language/dialect detection, ref/phone extraction, selection
