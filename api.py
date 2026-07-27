@@ -73,14 +73,25 @@ def get_bookings_by_phone(
     language: Optional[str] = None,
     client_id: Optional[str] = None,
     page_size: int = 1000,
+    status_list: Optional[list] = None,
 ) -> dict:
     """POST {base_url}/api/GuestBookings/GetList with mobileNumber + pageSize.
 
     Mirrors f_lookup_appointment.json "HTTP Request2" (pageSize: 1000).
+
+    `status_list`, when given, is sent as the API's own "statusList"
+    filter field (confirmed from the Booking API's documented request
+    schema) - e.g. [1, 2] for New+Confirmed only. This lets the server
+    do the active-status filtering directly. tools.py's own client-side
+    filtering (_filter_active) still runs afterward as a second,
+    defense-in-depth layer regardless of whether this is used.
     """
 
     url = f"{base_url}/api/GuestBookings/GetList"
     payload = {"mobileNumber": phone, "pageSize": page_size}
+
+    if status_list:
+        payload["statusList"] = status_list
 
     return _post_bookings(url, payload, language, client_id)
 
