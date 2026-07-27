@@ -106,10 +106,33 @@ def agent(state: AgentState) -> dict:
     added because relying on the LLM alone measurably did not keep the
     greeting's exact wording/structure consistent across separate
     conversations, despite explicit instructions to reuse it verbatim.
-    This does not change how the LLM handles anything else - only this
-    one, always-first message is guaranteed byte-for-byte."""
 
-    system_message = SystemMessage(content=state["system_prompt"])
+    DOUBLE-GREETING FIX: on the first turn, the LLM is ALSO told, via an
+    extra instruction appended to the system message, not to write any
+    greeting/opener of its own - it should respond only to the user's
+    actual message, as if the greeting had already been handled. Without
+    this, the LLM would often still produce its own short greeting-style
+    opener ("صباح النور! ...") alongside the deterministically-prepended
+    official one, producing two different-looking greetings back to
+    back in the same reply (observed directly in production)."""
+
+    system_content = state["system_prompt"]
+
+    if not state.get("greeted"):
+        system_content += (
+            "\n\n============================================================\n"
+            "FIRST-TURN OVERRIDE\n"
+            "============================================================\n"
+            "This is the first message of a new conversation. The opening "
+            "greeting/persona introduction has ALREADY been (or will be) sent "
+            "separately, outside of what you write here. Do NOT write any "
+            "greeting, self-introduction, or generic opener of your own "
+            "(no 'صباح النور'/'مساء النور'/'Hello! How can I help?' or "
+            "similar) - go straight to addressing whatever the user actually "
+            "said, exactly as you would on any other turn of the conversation."
+        )
+
+    system_message = SystemMessage(content=system_content)
     response = _llm_with_tools.invoke([system_message] + state["messages"])
 
     updates: dict = {}
